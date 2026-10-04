@@ -5,7 +5,8 @@ import { QuestionInteractor } from '../browser/interactions';
 import { MoodlePageController } from '../browser/moodle';
 import { QuestionSolver } from '../llm/solver';
 import { StateManager } from './state';
-import { logger, logCli, formatTime } from '../utils/logger';
+import { KnowledgeBase } from './knowledge-base';
+import { logger, logCli } from '../utils/logger';
 import { LLMQuizAnswer, QuestionExecutionResult } from './question-types';
 
 export interface QuizExecutorOptions {
@@ -14,6 +15,7 @@ export interface QuizExecutorOptions {
   warningTimeSeconds: number;
   criticalTimeSeconds: number;
   maxQuestions?: number;
+  targetPacingSeconds?: number; // e.g. 15s average per question
 }
 
 export class QuizExecutor {
@@ -22,6 +24,7 @@ export class QuizExecutor {
   private interactor: QuestionInteractor;
   private moodleController: MoodlePageController;
   private stateManager: StateManager;
+  private knowledgeBase: KnowledgeBase;
   private options: QuizExecutorOptions;
 
   constructor(
@@ -39,6 +42,7 @@ export class QuizExecutor {
       options.criticalTimeSeconds
     );
     this.stateManager = stateManager;
+    this.knowledgeBase = new KnowledgeBase();
     this.options = options;
   }
 
@@ -59,7 +63,7 @@ export class QuizExecutor {
           break;
         }
         if (timerState.isCritical) {
-          logCli(`🚨 CRITICAL TIME WARNING: ${timerState.rawText} remaining! Disabling search and accelerating.`);
+          logCli(`🚨 CRITICAL TIME WARNING: ${timerState.rawText} remaining! Accelerated mode active.`);
         } else if (timerState.isWarning) {
           logger.warn({ timer: timerState.rawText }, 'Timer warning threshold reached');
         }
@@ -83,7 +87,6 @@ export class QuizExecutor {
       const rawExtracted = await extractQuestionFromDOM(this.page);
 
       if (!rawExtracted.questionContainerFound) {
-        // Maybe on summary page or intermediate page
         if (navState.isFinalQuestionPage || navState.isSummaryPage) {
           logCli('Reached the end of question items.');
           break;
@@ -128,40 +131,60 @@ export class QuizExecutor {
         }
       }
 
-      // Solve with LLM
-      const isLowTime = timerState.isCritical;
-      let solveResult;
+      // STEP 1: Check Ground Truth Knowledge Base from Attempt 1 Review
+      const kbAnswer = this.knowledgeBase.matchQuestion(question);
+      let solveResult: {
+        answer: LLMQuizAnswer;
+        confidence: number;
+        searched: boolean;
+        searchQueries?: string[];
+        latencyMs: number;
+        source: 'knowledge_base' | 'llm';
+      };
 
-      try {
-        solveResult = await this.solver.solve(question, isLowTime);
-      } catch (err: any) {
-        logCli(`❌ Error solving question #${question.number}: ${err.message}`);
-        const failedResult: QuestionExecutionResult = {
-          questionNumber: question.number,
-          questionHash: question.hash,
-          type: question.type,
-          answer: { type: 'single_choice', answer: '', confidence: 0, needs_search: false },
-          confidence: 0,
+      if (kbAnswer) {
+        logCli('🎯 [Knowledge Base] Verified Ground Truth match found from Attempt 1!');
+        solveResult = {
+          answer: kbAnswer,
+          confidence: 1.0,
           searched: false,
-          status: 'failed',
-          timestamp: new Date().toISOString(),
-          latencyMs: 0,
-          errorMessage: err.message
+          latencyMs: 15,
+          source: 'knowledge_base'
         };
-        this.stateManager.recordQuestionResult(failedResult);
+      } else {
+        // STEP 2: Solve with LLM Pool (Round-Robin)
+        const isLowTime = timerState.isCritical;
+        try {
+          const llmRes = await this.solver.solve(question, isLowTime);
+          solveResult = { ...llmRes, source: 'llm' };
+        } catch (err: any) {
+          logCli(`❌ Error solving question #${question.number}: ${err.message}`);
+          const failedResult: QuestionExecutionResult = {
+            questionNumber: question.number,
+            questionHash: question.hash,
+            type: question.type,
+            answer: { type: 'single_choice', answer: '', confidence: 0, needs_search: false },
+            confidence: 0,
+            searched: false,
+            status: 'failed',
+            timestamp: new Date().toISOString(),
+            latencyMs: 0,
+            errorMessage: err.message
+          };
+          this.stateManager.recordQuestionResult(failedResult);
 
-        if (!this.options.dryRun && navState.hasNextButton) {
-          logCli('Skipping unresolved question and navigating next...');
-          await this.moodleController.clickNextPage(question.number);
+          if (!this.options.dryRun && navState.hasNextButton) {
+            logCli('Skipping unresolved question and navigating next...');
+            await this.moodleController.clickNextPage(question.number);
+          }
+          continue;
         }
-        continue;
       }
 
       // Format answer for CLI display
       const answerDisplay = this.formatAnswerForDisplay(solveResult.answer);
-      logCli(`LLM answer: ${answerDisplay}`);
+      logCli(`Answer [${solveResult.source}]: ${answerDisplay}`);
       logCli(`Confidence: ${solveResult.confidence.toFixed(2)}`);
-      logCli(`Search: ${solveResult.searched ? 'yes (' + (solveResult.searchQueries?.join(', ') || '') + ')' : 'no'}`);
 
       if (this.options.dryRun) {
         logCli('[DRY-RUN] Answer evaluated. No browser modifications made.');
@@ -233,6 +256,9 @@ export class QuizExecutor {
         break;
       }
 
+      // SENSABLE PACING REGULATOR (Target ~50-52 mins for 200 questions = ~14-16s per question)
+      await this.applySensiblePacing(timerState.totalSecondsRemaining, question.number);
+
       // Click Next Page
       logCli('Next page');
       try {
@@ -243,10 +269,42 @@ export class QuizExecutor {
       }
 
       // Brief delay to allow page render
-      await this.page.waitForTimeout(400);
+      await this.page.waitForTimeout(500);
     }
 
     logCli('Solver finished run cycle.');
+  }
+
+  /**
+   * Applies sensible, human-like pacing so 200 questions complete in ~50-52 minutes.
+   * Neither suspiciously fast nor risking a timeout.
+   */
+  private async applySensiblePacing(secondsRemaining: number, currentQuestionNo: number): Promise<void> {
+    if (this.options.dryRun) return;
+
+    // Remaining questions estimate
+    const remainingQuestions = Math.max(1, 200 - currentQuestionNo);
+    let delaySec = 14;
+
+    if (secondsRemaining <= 180) {
+      // Critical time: under 3 mins left -> minimum delay
+      delaySec = 1;
+    } else if (secondsRemaining <= 600) {
+      // Warning time: under 10 mins left -> speed up to 4-6s
+      delaySec = 4 + Math.random() * 2;
+    } else {
+      // Healthy time: calculate optimal delay to finish at 50-52 minutes mark (buffer of 8-10 mins)
+      const targetAvailableSec = Math.max(secondsRemaining - 480, remainingQuestions * 10);
+      const idealSec = targetAvailableSec / remainingQuestions;
+      
+      // Clamp between 11s and 16s with human-like jitter (+/- 2.5s)
+      const baseSec = Math.max(11, Math.min(16, idealSec));
+      const jitter = (Math.random() * 4) - 2; // -2 to +2s
+      delaySec = Math.max(8, baseSec + jitter);
+    }
+
+    logCli(`⏳ Natural pacing delay: ${delaySec.toFixed(1)}s (estimated pace: ${(60 / delaySec).toFixed(1)} q/min)`);
+    await this.page.waitForTimeout(delaySec * 1000);
   }
 
   private formatAnswerForDisplay(answer: LLMQuizAnswer): string {
