@@ -47,7 +47,16 @@ export function buildQuestionPrompt(
   "reason": "concise rationale"
 }`;
   } else if (question.type === 'multiple_choice') {
-    prompt += `\nAvailable Options (Multiple Choice - select all that are correct):\n`;
+    const qLower = (question.questionText + ' ' + (question.instructionText || '')).toLowerCase();
+    let countHint = '';
+    if (qLower.includes('pilih dua') || qLower.includes('pilih 2')) {
+      countHint = ' (NOTICE: The question explicitly asks to SELECT EXACTLY TWO OPTIONS)';
+    } else if (qLower.includes('pilih tiga') || qLower.includes('pilih 3')) {
+      countHint = ' (NOTICE: The question explicitly asks to SELECT EXACTLY THREE OPTIONS)';
+    } else if (qLower.includes('pilih satu') || qLower.includes('pilih 1')) {
+      countHint = ' (NOTICE: The question explicitly asks to SELECT EXACTLY ONE OPTION)';
+    }
+    prompt += `\nAvailable Options (Multiple Choice - select all that are correct)${countHint}:\n`;
     question.multipleChoiceOptions?.forEach((opt) => {
       prompt += `- ID: "${opt.id}" | Label: "${opt.label}"\n`;
     });

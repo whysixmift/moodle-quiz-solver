@@ -6,11 +6,12 @@ import { logger } from '../utils/logger';
 
 export interface GroundTruthEntry {
   number: number;
-  status_attempt_1: string;
-  mark_attempt_1: string;
+  source_attempt?: number;
+  original_number?: number;
   type: string;
   question_text: string;
   ground_truth: string;
+  structured_matching?: Array<{ prompt: string; answer: string }>;
 }
 
 export class KnowledgeBase {
@@ -34,7 +35,7 @@ export class KnowledgeBase {
   }
 
   /**
-   * Token similarity ratio (Jaccard similarity on lowercased alphanumeric words)
+   * Token similarity ratio (combines Jaccard similarity and subset containment)
    */
   private similarity(textA: string, textB: string): number {
     const wordsA = new Set(normalizeText(textA).toLowerCase().match(/\w+/g) || []);
@@ -48,7 +49,20 @@ export class KnowledgeBase {
     }
 
     const union = new Set([...wordsA, ...wordsB]).size;
-    return union > 0 ? intersection / union : 0;
+    const jaccard = union > 0 ? intersection / union : 0;
+    const containment = Math.max(intersection / wordsA.size, intersection / wordsB.size);
+    return Math.max(jaccard, containment * 0.82);
+  }
+
+  /**
+   * Strips prefix labels like [CODE-A], A., 1. to compare clean prompt content
+   */
+  private cleanPrompt(text: string): string {
+    return text
+      .replace(/^\[CODE-[A-Z0-9_-]+\]\s*/i, '')
+      .replace(/^[A-Za-z0-9]\.\s+/, '')
+      .replace(/\s+/g, ' ')
+      .trim();
   }
 
   /**
@@ -70,13 +84,13 @@ export class KnowledgeBase {
       }
     }
 
-    // Require high confidence match (> 0.70 word overlap)
-    if (!bestEntry || highestSim < 0.70) {
+    // Require high confidence match (> 0.60 word overlap or containment)
+    if (!bestEntry || highestSim < 0.60) {
       return null;
     }
 
     logger.info(
-      { questionNo: question.number, kbMatchNo: bestEntry.number, similarity: highestSim.toFixed(2) },
+      { questionNo: question.number, kbMatchNo: bestEntry.number, attempt: bestEntry.source_attempt || '1/2', similarity: highestSim.toFixed(2) },
       '🎯 Ground Truth Knowledge Base match found'
     );
 
@@ -84,32 +98,48 @@ export class KnowledgeBase {
 
     // 2. Map answer according to question type
     if (question.type === 'matching') {
-      // Ground truth format: "Prompt1 → Answer1, Prompt2 → Answer2"
-      const pairs = gt.split(/,\s*(?=[A-Za-z0-9\[])/).map(p => p.split('→').map(s => s.trim()));
+      let pairs: Array<{ prompt: string; answer: string }> = bestEntry.structured_matching || [];
+
+      // Fallback: parse pairs if not structured
+      if (pairs.length === 0 && gt.includes('→')) {
+        const rawPairs = gt.split(/,\s*(?=[A-Za-z0-9\[])/).map(p => p.split('→').map(s => s.trim()));
+        pairs = rawPairs
+          .filter(p => p.length >= 2)
+          .map(p => ({ prompt: p[0], answer: p[1] }));
+      }
+
       const matches: Array<{ prompt_index: number; option_value: string }> = [];
 
       for (const row of question.matchingRows || []) {
-        // Find corresponding pair
         let matchedVal = '';
-        for (const [promptText, targetAnswer] of pairs) {
-          if (promptText && targetAnswer) {
-            const pSim = this.similarity(row.promptText, promptText);
-            if (pSim > 0.4) {
-              // Match targetAnswer against row's dropdown options
-              let bestOptVal = '';
-              let bestOptSim = 0;
-              for (const opt of row.options) {
-                const optSim = this.similarity(opt.label, targetAnswer);
-                if (optSim > bestOptSim) {
-                  bestOptSim = optSim;
-                  bestOptVal = opt.value;
-                }
-              }
-              if (bestOptSim > 0.4) {
-                matchedVal = bestOptVal;
-                break;
-              }
+        let bestPromptSim = 0;
+        let matchedPair: { prompt: string; answer: string } | null = null;
+
+        // Find best matching prompt pair
+        for (const pair of pairs) {
+          const rawSim = this.similarity(row.promptText, pair.prompt);
+          const cleanSim = this.similarity(this.cleanPrompt(row.promptText), this.cleanPrompt(pair.prompt));
+          const effectiveSim = Math.max(rawSim, cleanSim);
+
+          if (effectiveSim > bestPromptSim && effectiveSim > 0.35) {
+            bestPromptSim = effectiveSim;
+            matchedPair = pair;
+          }
+        }
+
+        if (matchedPair) {
+          // Match targetAnswer against row's dropdown options
+          let bestOptVal = '';
+          let bestOptSim = 0;
+          for (const opt of row.options) {
+            const optSim = this.similarity(opt.label, matchedPair.answer);
+            if (optSim > bestOptSim) {
+              bestOptSim = optSim;
+              bestOptVal = opt.value;
             }
+          }
+          if (bestOptSim > 0.30) {
+            matchedVal = bestOptVal;
           }
         }
 
@@ -124,7 +154,7 @@ export class KnowledgeBase {
           matches,
           confidence: 1.0,
           needs_search: false,
-          reason: `Ground truth match from Attempt 1 (Question #${bestEntry.number})`
+          reason: `Ground truth match from Attempt ${bestEntry.source_attempt || 1} (Question #${bestEntry.original_number || bestEntry.number})`
         };
         return answer;
       }
@@ -134,6 +164,13 @@ export class KnowledgeBase {
       let bestOptSim = 0;
 
       for (const opt of options) {
+        // Direct string match or similarity
+        if (opt.label.trim().toLowerCase() === gt.trim().toLowerCase()) {
+          bestOptId = opt.id;
+          bestOptSim = 1.0;
+          break;
+        }
+
         const sim = this.similarity(opt.label, gt);
         if (sim > bestOptSim) {
           bestOptSim = sim;
@@ -141,25 +178,62 @@ export class KnowledgeBase {
         }
       }
 
-      if (bestOptId && bestOptSim > 0.5) {
+      if (bestOptId && bestOptSim > 0.45) {
         const answer: SingleChoiceAnswer = {
           type: 'single_choice',
           answer: bestOptId,
           confidence: 1.0,
           needs_search: false,
-          reason: `Ground truth match from Attempt 1 (Question #${bestEntry.number})`
+          reason: `Ground truth match from Attempt ${bestEntry.source_attempt || 1} (Question #${bestEntry.original_number || bestEntry.number})`
         };
         return answer;
       }
     } else if (question.type === 'multiple_choice') {
       const options = question.multipleChoiceOptions || [];
-      // Ground truth may contain comma separated labels
       const answers: string[] = [];
 
+      // Calculate inclusion ratio of each option's words inside gt
+      const gtWords = new Set(normalizeText(gt).toLowerCase().match(/\w+/g) || []);
+      const scoredOptions: Array<{ id: string; ratio: number; label: string }> = [];
+
       for (const opt of options) {
-        // If option label is contained in ground truth
-        if (gt.toLowerCase().includes(opt.label.toLowerCase()) || this.similarity(opt.label, gt) > 0.6) {
-          answers.push(opt.id);
+        const optWords = normalizeText(opt.label).toLowerCase().match(/\w+/g) || [];
+        if (optWords.length === 0) continue;
+        let matched = 0;
+        for (const w of optWords) {
+          if (gtWords.has(w)) matched++;
+        }
+        const ratio = matched / optWords.length;
+        scoredOptions.push({ id: opt.id, ratio, label: opt.label });
+      }
+
+      // Check how many answers are required from question prompt
+      let expectedCount = 2;
+      const qLower = (question.questionText + ' ' + (question.instructionText || '')).toLowerCase();
+      if (qLower.includes('pilih tiga') || qLower.includes('pilih 3')) {
+        expectedCount = 3;
+      } else if (qLower.includes('pilih satu') || qLower.includes('pilih 1')) {
+        expectedCount = 1;
+      } else if (qLower.includes('pilih empat') || qLower.includes('pilih 4')) {
+        expectedCount = 4;
+      }
+
+      scoredOptions.sort((a, b) => b.ratio - a.ratio);
+
+      // Select options with high inclusion ratio (> 0.70)
+      for (const item of scoredOptions) {
+        if (item.ratio > 0.70) {
+          answers.push(item.id);
+        }
+      }
+
+      // If strict threshold missed some, fill up to expected count with top candidate(s) if ratio > 0.45
+      if (answers.length < expectedCount && scoredOptions.length >= expectedCount) {
+        for (let i = 0; i < expectedCount; i++) {
+          const item = scoredOptions[i];
+          if (item && item.ratio > 0.45 && !answers.includes(item.id)) {
+            answers.push(item.id);
+          }
         }
       }
 
@@ -169,7 +243,7 @@ export class KnowledgeBase {
           answers,
           confidence: 1.0,
           needs_search: false,
-          reason: `Ground truth match from Attempt 1 (Question #${bestEntry.number})`
+          reason: `Ground truth match from Attempt ${bestEntry.source_attempt || 1} (Question #${bestEntry.original_number || bestEntry.number})`
         };
         return answer;
       }
