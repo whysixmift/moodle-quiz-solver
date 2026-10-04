@@ -15,6 +15,8 @@
     "inspect": "tsx src/cli/index.ts inspect",
     "status": "tsx src/cli/index.ts status",
     "resume": "tsx src/cli/index.ts resume",
+    "evaluate": "tsx src/cli/index.ts evaluate",
+    "audit": "tsx src/cli/index.ts evaluate",
     "test": "vitest run",
     "test:watch": "vitest"
   },

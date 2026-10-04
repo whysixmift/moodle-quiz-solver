@@ -8,6 +8,9 @@ import { OpenAICompatibleClient } from '../llm/client';
 import { QuestionSolver } from '../llm/solver';
 import { StateManager } from '../quiz/state';
 import { QuizExecutor } from '../quiz/executor';
+import { KnowledgeBase } from '../quiz/knowledge-base';
+import { QuestionInteractor } from '../browser/interactions';
+import { QuizAuditor } from '../quiz/auditor';
 
 const program = new Command();
 
@@ -206,6 +209,69 @@ program
       await executor.run();
     } catch (err: any) {
       logCli(`❌ Execution error during resume: ${err.message}`);
+    } finally {
+      if (session) {
+        await session.disconnect();
+      }
+    }
+  });
+
+/**
+ * COMMAND: evaluate (alias: audit)
+ * Evaluates selected answers starting from current page backwards down to Question 1.
+ * Automatically verifies and fixes any discrepancies against the Knowledge Base / LLM.
+ */
+program
+  .command('evaluate')
+  .alias('audit')
+  .description('Audit and verify selected answers backwards from current page to Question 1')
+  .action(async (_cmdOpts, cmd) => {
+    const parentOpts = cmd.parent?.opts() || {};
+    const config = getConfig({
+      BROWSER_CDP_URL: parentOpts.cdpUrl,
+      LLM_MODEL: parentOpts.model,
+      CONFIDENCE_THRESHOLD: parentOpts.confidence ? parseFloat(parentOpts.confidence) : undefined,
+      ENABLE_SEARCH: parentOpts.search !== false,
+      LOG_LEVEL: parentOpts.debug ? 'debug' : undefined
+    });
+
+    logCli(`Connecting to browser via CDP (${config.BROWSER_CDP_URL})...`);
+    let session;
+
+    try {
+      session = await BrowserConnector.connect({
+        cdpUrl: config.BROWSER_CDP_URL,
+        executablePath: config.BROWSER_EXECUTABLE_PATH,
+        targetQuizUrl: config.TARGET_QUIZ_URL
+      });
+
+      const kb = new KnowledgeBase();
+      const llmClient = new OpenAICompatibleClient({
+        baseUrl: config.LLM_BASE_URL,
+        apiKey: config.LLM_API_KEY,
+        model: config.LLM_MODEL
+      });
+
+      const solver = new QuestionSolver(llmClient, {
+        confidenceThreshold: config.CONFIDENCE_THRESHOLD,
+        enableSearch: config.ENABLE_SEARCH,
+        maxSearchResults: config.MAX_SEARCH_RESULTS
+      });
+
+      const interactor = new QuestionInteractor(session.page);
+      const moodleController = new MoodlePageController(session.page);
+
+      const auditor = new QuizAuditor(
+        session.page,
+        kb,
+        solver,
+        interactor,
+        moodleController
+      );
+
+      await auditor.auditBackward();
+    } catch (err: any) {
+      logCli(`❌ Audit execution error: ${err.message}`);
     } finally {
       if (session) {
         await session.disconnect();

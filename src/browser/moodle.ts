@@ -216,6 +216,38 @@ export class MoodlePageController {
   }
 
   /**
+   * Clicks Previous page and waits for DOM update.
+   */
+  public async clickPreviousPage(): Promise<boolean> {
+    logger.debug('Attempting navigation to previous page');
+
+    let clicked = false;
+
+    for (const sel of MOODLE_SELECTORS.NAV_PREV) {
+      try {
+        const loc = this.page.locator(sel);
+        if (await loc.count() > 0 && await loc.first().isVisible()) {
+          await Promise.all([
+            this.page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => null),
+            loc.first().click()
+          ]);
+          clicked = true;
+          break;
+        }
+      } catch {
+        // continue
+      }
+    }
+
+    if (!clicked) {
+      return false;
+    }
+
+    await this.page.waitForTimeout(300);
+    return true;
+  }
+
+  /**
    * Handles final submission if AUTO_SUBMIT=true.
    */
   public async handleFinalSubmission(): Promise<boolean> {
