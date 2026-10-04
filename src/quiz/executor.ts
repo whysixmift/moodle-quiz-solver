@@ -143,7 +143,7 @@ export class QuizExecutor {
       };
 
       if (kbAnswer) {
-        logCli('🎯 [Knowledge Base] Verified Ground Truth match found from Attempt 1!');
+        logCli(`🎯 [Knowledge Base] ${kbAnswer.reason || 'Verified Ground Truth match found!'}`);
         solveResult = {
           answer: kbAnswer,
           confidence: 1.0,
