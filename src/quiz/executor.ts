@@ -256,11 +256,7 @@ export class QuizExecutor {
         break;
       }
 
-      // PACING REGULATOR (5s if answer found, max 8s if not)
-      const isKnown = solveResult.source === 'knowledge_base' || solveResult.confidence >= 0.85;
-      await this.applySensiblePacing(timerState.totalSecondsRemaining, isKnown);
-
-      // Click Next Page
+      // Click Next Page immediately (No pacing delay - maximum speed)
       logCli('Next page');
       try {
         await this.moodleController.clickNextPage(question.number);
@@ -270,36 +266,10 @@ export class QuizExecutor {
       }
 
       // Brief delay to allow page render
-      await this.page.waitForTimeout(500);
+      await this.page.waitForTimeout(300);
     }
 
     logCli('Solver finished run cycle.');
-  }
-
-  /**
-   * Pacing regulator:
-   * - 5s delay if answer is already found / known
-   * - Max 8s delay if needing deeper evaluation
-   * - 1s if timer is under 3 minutes
-   */
-  private async applySensiblePacing(secondsRemaining: number, isKnownAnswer: boolean): Promise<void> {
-    if (this.options.dryRun) return;
-
-    let delaySec: number;
-
-    if (secondsRemaining <= 180) {
-      // Critical time: under 3 mins left -> minimum delay
-      delaySec = 1;
-    } else if (isKnownAnswer) {
-      // Jawaban sudah ketemu (KB atau confident): 5 detik
-      delaySec = 5;
-    } else {
-      // Jawaban butuh evaluasi lebih: maksimal 8 detik
-      delaySec = 7.5;
-    }
-
-    logCli(`⏳ Pacing delay: ${delaySec.toFixed(1)}s (pace: ${(60 / delaySec).toFixed(1)} q/min)`);
-    await this.page.waitForTimeout(delaySec * 1000);
   }
 
   private formatAnswerForDisplay(answer: LLMQuizAnswer): string {
