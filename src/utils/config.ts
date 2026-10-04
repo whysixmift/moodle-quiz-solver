@@ -35,7 +35,7 @@ const ConfigSchema = z.object({
   WARNING_TIME_SECONDS: z.coerce.number().default(600),
   CRITICAL_TIME_SECONDS: z.coerce.number().default(180),
   LOG_LEVEL: z.string().default('info'),
-  TARGET_QUIZ_URL: z.string().default('https://lms.onnocenter.or.id/moodle/mod/quiz/attempt.php'),
+  TARGET_QUIZ_URL: z.string().default('https://lms.example.com/moodle/mod/quiz/attempt.php'),
   STATE_FILE_PATH: z.string().default('state/quiz-state.json'),
   LOGS_DIR: z.string().default('logs')
 });

@@ -40,7 +40,7 @@ export class BrowserConnector {
 
       for (const p of pages) {
         const url = p.url();
-        if (url.includes('attempt.php') || url.includes('mod/quiz') || url.includes('lms.onnocenter.or.id')) {
+        if (url.includes('attempt.php') || url.includes('mod/quiz') || url.includes('/quiz/')) {
           targetPage = p;
           logger.info({ url }, 'Located active Moodle quiz tab');
           break;

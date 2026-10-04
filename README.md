@@ -1,4 +1,4 @@
-# Moodle AI Quiz Solver (eLearningRakyat / OnnoCenter Edition)
+# Moodle AI Quiz Solver
 
 A production-quality, deterministic AI-assisted Moodle quiz solver designed for authorized educational quizzes. Built with **Node.js**, **TypeScript**, **Playwright (with Brave / Chromium)**, strict **Zod** schema validation, and OpenAI-compatible LLM endpoints with intelligent web search fallback.
 
@@ -114,14 +114,14 @@ brave --remote-debugging-port=9222 --user-data-dir=/tmp/brave-quiz-profile
 
 ### Step 2: Log in & Open Quiz
 
-1. In the Brave window that just opened, navigate to:
+1. In the Brave window that just opened, navigate to your Moodle LMS login:
    ```
-   https://lms.onnocenter.or.id/moodle/login/index.php
+   https://lms.example.com/moodle/login/index.php
    ```
 2. Log in manually with your account.
 3. Open your quiz attempt:
    ```
-   https://lms.onnocenter.or.id/moodle/mod/quiz/attempt.php
+   https://lms.example.com/moodle/mod/quiz/attempt.php
    ```
 
 ### Step 3: Run DOM Inspection (Verification)
