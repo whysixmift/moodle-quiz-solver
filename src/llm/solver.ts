@@ -90,18 +90,10 @@ export class QuestionSolver {
     let finalAnswer = parsedAnswer.answer!;
     const confidence = finalAnswer.confidence ?? 1.0;
 
-    // 2. Search Fallback: If confidence < threshold or model explicitly requests search, and search is enabled & time allows
-    const needsSearch =
-      (confidence < this.options.confidenceThreshold || finalAnswer.needs_search) &&
-      this.options.enableSearch &&
-      !isLowTime;
+    // 2. Search & Second-Thought Verification (Dual-Pass Reflective Reasoning)
+    const shouldVerify = this.options.enableSearch && !isLowTime;
 
-    if (needsSearch) {
-      logger.info(
-        { questionNo: question.number, confidence, threshold: this.options.confidenceThreshold },
-        'Confidence below threshold, triggering web search fallback'
-      );
-
+    if (shouldVerify) {
       const query = this.searchProvider.formulateQuery(
         question.questionText,
         question.singleChoiceOptions?.map(o => o.label).join('\n')
@@ -112,20 +104,39 @@ export class QuestionSolver {
       if (searchResp.success && searchResp.results.length > 0) {
         searched = true;
         searchResults = searchResp.results;
+      }
 
-        // Re-evaluate with search results
-        const enrichedPrompt = buildQuestionPrompt(question, searchResults);
-        const enrichedMessages: LLMMessage[] = [
-          { role: 'system', content: SYSTEM_PROMPT },
-          { role: 'user', content: enrichedPrompt }
-        ];
+      let secondThoughtPrompt = `On second thought, reconsider your previous answer. Look for assumptions you made and lookup the proofs on internet, then provide the corrected answer if necessary.`;
 
-        const enrichedRaw = await this.client.chatCompletion(enrichedMessages);
-        const enrichedParsed = this.parseAndValidate(question, enrichedRaw, enrichedPrompt);
+      if (searchResults && searchResults.length > 0) {
+        secondThoughtPrompt += `\n\n--- Verified Search Proofs from Internet ---\n`;
+        searchResults.forEach((res, idx) => {
+          secondThoughtPrompt += `[Source ${idx + 1}: ${res.title}]\n${res.snippet}\n\n`;
+        });
+      }
 
-        if (enrichedParsed.isValid && enrichedParsed.answer) {
-          finalAnswer = enrichedParsed.answer;
+      secondThoughtPrompt += `\nEnsure your response strictly follows the requested JSON schema without markdown formatting.`;
+
+      const reflectionMessages: LLMMessage[] = [
+        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'user', content: initialUserPrompt },
+        { role: 'assistant', content: rawAnswer },
+        { role: 'user', content: secondThoughtPrompt }
+      ];
+
+      try {
+        const reflectionRaw = await this.client.chatCompletion(reflectionMessages);
+        const reflectionParsed = this.parseAndValidate(question, reflectionRaw, secondThoughtPrompt);
+
+        if (reflectionParsed.isValid && reflectionParsed.answer) {
+          logger.info(
+            { questionNo: question.number },
+            '🧠 Second-thought reflection verification completed successfully'
+          );
+          finalAnswer = reflectionParsed.answer;
         }
+      } catch (err: any) {
+        logger.warn({ err: err.message }, 'Second-thought reflection pass failed, retaining initial answer');
       }
     }
 
