@@ -95,7 +95,8 @@ export class OpenAICompatibleClient {
           body: JSON.stringify({
             model: activeModel,
             messages,
-            temperature: 0.1
+            temperature: 0.1,
+            max_tokens: 800
           }),
           signal: controller.signal
         });
