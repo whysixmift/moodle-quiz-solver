@@ -256,8 +256,9 @@ export class QuizExecutor {
         break;
       }
 
-      // SENSABLE PACING REGULATOR (Target ~50-52 mins for 200 questions = ~14-16s per question)
-      await this.applySensiblePacing(timerState.totalSecondsRemaining, question.number);
+      // PACING REGULATOR (5s if answer found, max 8s if not)
+      const isKnown = solveResult.source === 'knowledge_base' || solveResult.confidence >= 0.85;
+      await this.applySensiblePacing(timerState.totalSecondsRemaining, isKnown);
 
       // Click Next Page
       logCli('Next page');
@@ -276,34 +277,28 @@ export class QuizExecutor {
   }
 
   /**
-   * Applies sensible, human-like pacing so 200 questions complete in ~50-52 minutes.
-   * Neither suspiciously fast nor risking a timeout.
+   * Pacing regulator:
+   * - 5s delay if answer is already found / known
+   * - Max 8s delay if needing deeper evaluation
+   * - 1s if timer is under 3 minutes
    */
-  private async applySensiblePacing(secondsRemaining: number, currentQuestionNo: number): Promise<void> {
+  private async applySensiblePacing(secondsRemaining: number, isKnownAnswer: boolean): Promise<void> {
     if (this.options.dryRun) return;
 
-    // Remaining questions estimate
-    const remainingQuestions = Math.max(1, 200 - currentQuestionNo);
-    let delaySec = 14;
+    let delaySec: number;
 
     if (secondsRemaining <= 180) {
       // Critical time: under 3 mins left -> minimum delay
       delaySec = 1;
-    } else if (secondsRemaining <= 600) {
-      // Warning time: under 10 mins left -> speed up to 4-6s
-      delaySec = 4 + Math.random() * 2;
+    } else if (isKnownAnswer) {
+      // Jawaban sudah ketemu (KB atau confident): 5 detik
+      delaySec = 5;
     } else {
-      // Healthy time: calculate optimal delay to finish at 50-52 minutes mark (buffer of 8-10 mins)
-      const targetAvailableSec = Math.max(secondsRemaining - 480, remainingQuestions * 10);
-      const idealSec = targetAvailableSec / remainingQuestions;
-      
-      // Clamp between 11s and 16s with human-like jitter (+/- 2.5s)
-      const baseSec = Math.max(11, Math.min(16, idealSec));
-      const jitter = (Math.random() * 4) - 2; // -2 to +2s
-      delaySec = Math.max(8, baseSec + jitter);
+      // Jawaban butuh evaluasi lebih: maksimal 8 detik
+      delaySec = 7.5;
     }
 
-    logCli(`⏳ Natural pacing delay: ${delaySec.toFixed(1)}s (estimated pace: ${(60 / delaySec).toFixed(1)} q/min)`);
+    logCli(`⏳ Pacing delay: ${delaySec.toFixed(1)}s (pace: ${(60 / delaySec).toFixed(1)} q/min)`);
     await this.page.waitForTimeout(delaySec * 1000);
   }
 
