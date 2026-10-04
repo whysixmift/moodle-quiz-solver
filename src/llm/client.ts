@@ -89,6 +89,7 @@ export class OpenAICompatibleClient {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64)',
             ...(this.apiKey ? { 'Authorization': `Bearer ${this.apiKey}` } : {})
           },
           body: JSON.stringify({
